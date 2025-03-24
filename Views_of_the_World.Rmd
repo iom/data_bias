@@ -1,0 +1,443 @@
+---
+title: "Using data to counter cognitive biais"
+subtitle: "How accurate are our views of the world?"
+output:
+  iomdown::pptx_slides
+params:
+  datafolder: "data-raw"
+  data: "data.xlsx"
+  form: "form.xlsx"
+  surveyday: "6-12"
+  datasource: "Answers (% from total response) from XXXX.\n The green bar represent the correct answer and its average percentage within the survey sample from Gapminder"
+
+---
+
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, 
+                      message = FALSE, 
+                      warning = FALSE,
+                      collapse = FALSE,
+                      comment = "#>",
+                      # fig.width = 5.5, fig.height = 4,
+                      fig.retina = 2, 
+                      fig.width = 7,
+                      fig.asp = 0.618,
+                      fig.align = "center",
+                      dev = "ragg_png",
+                      out.width = "70%")
+options(scipen = 999) # turn-off scientific notation like 1e+48
+set.seed(1)
+extrafont::loadfonts(quiet=TRUE)
+
+library("tidyverse")
+library("officedown")
+library("ggplot2")
+library("rvg")
+library("tidyverse")
+library("scales")
+library("lubridate")
+
+
+##  make sure to get last version 
+if ( packageVersion("kobocruncher") != "0.2.6"){pak::pkg_install("edouard-legoupil/kobocruncher")}
+library("kobocruncher")
+# turn off the automatic use of showtext functionality, so that the dml function can works properly
+showtext::showtext_auto(FALSE) 
+```
+
+```{r  }
+# ## The 2 lines below are for the demo - please comment the 2 below 
+# # and uncomment the one after once you have set up your report parameters..
+# datapath <- system.file("data.xlsx", package = "kobocruncher")
+# xlsformpath <-  system.file("sample_xlsform.xlsx", package = "kobocruncher")
+datapath <- here::here(params$datafolder, params$data)
+xlsformpath <- here::here(params$datafolder, params$form) 
+# 
+datalist <- kobo_data(datapath = datapath )
+check <- datalist[["main"]]
+## Filter on Survey Day
+datalist[["main"]] <- datalist[["main"]] |>
+                   dplyr::mutate(submission_day = paste0(
+                     lubridate::mday(lubridate::as_datetime(datalist[["main"]][["_submission_time"]])),
+                     "-",
+                     lubridate::month(lubridate::as_datetime(datalist[["main"]][["_submission_time"]]))
+                     )) |>
+                   dplyr::filter(submission_day %in% c("10-12", "11-12")  )
+
+
+dico <- kobo_dico(xlsformpath = xlsformpath)
+questions <- as.data.frame(dico[1])
+```
+
+```{r function-plot_select_one}
+#' @title Plotting Select one variable
+#' @description Note that if the column order is set in the xlsform choice part, the variable will be de factor considered as ordinal and the default ordering will not be done based on frequency
+#' @param datalist An object of the "datalist" class as defined in kobocruncher 
+#' @param dico An object of the "kobodico" class format as defined in kobocruncher
+#' @param var name of the variable to display
+#' @param datasource name of the data source to display, if set to NULL - then pulls the form_title within the settings of the xlsform 
+#' @param n if not NULL, lumps all levels except for the n most frequent (or least frequent if n < 0) - cf
+#'            forcats::fct_lump_n()
+#' @param showcode display the code
+#' 
+#' @import ggplot2 
+#' @import dplyr
+#' @importFrom data.table := 
+#' 
+#' @export
+# prefixer::import_from(fun = kobo_dico)
+
+plot_select_one <- function(datalist  ,
+                            dico  ,
+                            var,
+                            datasource = NULL,
+                            n = NULL, 
+                            showcode = FALSE) {
+
+  #requireNamespace("ggplot2")
+  #requireNamespace("dplyr")
+  ## Get default data source name 
+  if( is.null(datasource)) {datasource <- as.character(  dico[[3]]$form_title ) }
+  
+ 
+  data <- kobo_frame(datalist = datalist,
+                   dico = dico,
+                   var = var  )
+  
+  ## get response rate: rr
+  rr <- mean(!is.na(data[[var]]))
+  ## get number of non NA response
+  nr <- sum(!is.na(data[[var]]))
+  
+  if ( is.nan(rr)) {
+    cat(paste0("\n <strong style=\"color:#0033A0;\">The variable from the form called: ",var," could not be identified in the dataset</strong>\n\n"))
+   # return(invisible(NULL))
+     return(invisible())
+    
+  } else {
+  
+  ## Put a condition in case there's no record
+  if (rr != 0  & ! (is.nan(rr)) ) {
+    
+  
+  ## Count number of levels   
+  nlev <-  nlevels( as.factor(data[[var]]) )  
+  ## Set the value for n if not set up -
+  if( is.null(n)) { n1 = nlev } else { n1 = n}
+  
+  cnts <- data |>
+    tidyr::drop_na(tidyselect::all_of(var)) |>
+    dplyr::group_by(.data[[var]]) |>
+    #dplyr::summarise(n = dplyr::n()) |>
+    dplyr::count(x := .data[[var]]) |>
+    dplyr::mutate(p = n/nr) |>
+    # Lump together factor levels into "other"
+    dplyr::mutate(x = forcats::fct_lump_n( as.factor(x),    
+                                         n = as.integer(n1),
+                                         w = p,
+                     other_level = paste0("Other ",
+                              nlev  - n1,
+                              " response options automatically lumped") )) |>
+    dplyr::group_by(x) |>
+    dplyr::summarise( n = sum(n, na.rm = TRUE),
+                      p = n/nr)
+  
+  
+  
+  listvar <- as.data.frame(dico[["variables"]]) |>
+             dplyr::filter( name ==var ) |>
+             dplyr::pull(list_name)
+  
+  ## Manage situation if ordinal variable (i.e. order is set in choices)
+  if (any(!is.na(dplyr::filter(dico[[2]], list_name == listvar)$order))) {
+    
+    
+    ## case there are duplicated answers options - for instance if allow_choice_duplicates = yes
+    ll <- dplyr::filter(dico[[2]], list_name == listvar) |>
+          dplyr::group_by(name) |> 
+          dplyr::slice_head(n = 1)|>
+          ## Fix in case some orders are empty... 
+          dplyr::mutate( order = ifelse(is.na(order),1, order))
+    
+    cnts <- cnts |>
+          dplyr::left_join( ll, by = c("x"="name"))|>
+          dplyr::mutate(x = forcats::fct_reorder(x, order, as.numeric))
+  } else {
+    cnts <- cnts |>
+      dplyr::mutate(x = forcats::fct_reorder(x, n))
+  }
+  
+  ## Writing code instruction in report
+  if( showcode == TRUE) { cat(paste0("\n", label_varname(dico = dico,
+                                                   x = var), "\n",
+                                      
+     "`plot_select_one(datalist, dico, \"", var, "\", datasource = params$datasource, n = ",n1, ")` \n\n ")) }  else {}
+  
+    
+    ## plot
+    #require(ggplot2)
+    p <- ggplot2::ggplot(cnts, ggplot2::aes(p, x)) +
+      ggplot2::geom_col(fill = "#0033A0", width = 0.7) +
+      
+      #geom_label(aes(label = scales::label_percent(accuracy = .01)(p))) +
+      ## Position label differently in the bar in white - outside bar in black
+      ggplot2::geom_label( data =   function(x) subset(x, p < max(p) / 1.5),
+                  ggplot2::aes(label = scales::label_percent(accuracy = .1)(p)),
+                  hjust = -0.1 ,
+                  vjust = 0.5,
+                  colour = "black",
+                  fill = NA,
+                  label.size = NA,
+                  size = 6   ) +
+      ggplot2::geom_label( data =   function(x) subset(x, p >= max(p) / 1.5),
+                  ggplot2::aes(label = scales::label_percent(accuracy = .1)(p)),
+                  hjust = 1.1 ,
+                  vjust = 0.5,
+                  colour = "white",
+                  fill = NA,
+                  label.size = NA,
+                  size = 6   ) +
+      ggplot2::scale_x_continuous(labels = scales::label_percent()) +
+      ggplot2::scale_y_discrete(labels = function(x) {label_choiceset(dico = dico, x = var)(x) |>
+                      stringr::str_wrap(40)}) +
+      ggplot2::coord_cartesian(clip = "off") +
+      ggplot2::labs(x = NULL, y = NULL,
+           title = stringr::str_wrap(label_varname(dico = dico, x = var), 80),
+           subtitle = if (!is.na(label_varhint(dico = dico, x= var))){
+                      stringr::str_wrap(label_varhint(dico = dico, x= var), 90)} else { ""},
+           caption = glue::glue("{datasource}")) +
+      ggplot2::theme_minimal( base_size = 24) +
+      ggplot2::geom_vline(xintercept = 0, size = 1.1, colour = "#333333") +
+      ggplot2::theme( panel.grid.major.x  = ggplot2::element_line(color = "#cbcbcb"),
+             panel.grid.major.y  = ggplot2::element_blank(),
+             panel.grid.minor = ggplot2::element_blank()    ) +
+      ggplot2::theme(plot.title.position = "plot")
+    
+   return(p) #  print(p)
+    
+  } else { 
+    cat(paste0("<strong style=\"color:#0033A0;\"> No recorded answers for the question: </strong>",var,"\n\n")) 
+      #return(invisible(NULL))
+      return(invisible())
+    }
+  # cat("\n\n")
+  }
+}  
+
+
+
+```
+
+
+
+# The questions you just replied to were selected because...
+
+__Most people are wrong about them!__ 
+
+Their responses illustrate how cognitive bias can take us away from factual truth!
+
+  1. Generalization
+  2. Binary Thinking
+  3. Manifest Destiny
+  4. Single Perspective
+  5. Fear Factor
+  6. Exaggeration
+  7. Dramatization
+  
+_In average, the respondent in this group got only `r round(mean( as.numeric(datalist[["main"]][["score2"]])),2)*100`% of the questions correct!_
+
+---
+
+# Bias 1: Generalization 
+
+Making broad assumptions based on limited information, which can lead to stereotypes or misconceptions.
+
+__Sample Representation__: Is our sample representative of the entire population we’re studying? Are there any groups that are underrepresented or over-represented?
+
+```{r ph=officer::ph_location(width = 10, height = 4, left = 1, top = 3)}
+
+## Correct answer
+x <- "C"
+p <- 0.16
+truth <- as.data.frame( cbind(x, p) )
+truth$p <- as.numeric(truth$p)
+
+plot_select_one(datalist, dico, "q1", datasource = params$datasource, n = 5) +
+  ggplot2::geom_col(data = truth, fill = "#5CB8B2", alpha = 0.7, width = 0.9) +
+  theme( plot.title = element_text(size = 19),
+         plot.subtitle = element_text(size = 16, color = "#0033A0"),
+         plot.caption = element_text(size = 10)) -> mygg
+
+dml(ggobj = mygg, fonts = list(serif = 'Lato'))
+```
+
+---
+
+# Bias 2: Binary Thinking
+
+The tendency to divide things into two opposing groups, often assuming a huge gap exists between them, like rich and poor, or good and bad.
+
+__Distribution Analysis__: Are we analyzing the full distribution of our data rather than just focusing on the extremes?
+
+```{r ph=officer::ph_location(width = 10, height = 4, left = 1, top = 3)}
+
+## Correct answer
+x <- "B"
+p <- 0.24
+truth <- as.data.frame( cbind(x, p) )
+truth$p <- as.numeric(truth$p)
+
+plot_select_one(datalist, dico, "q2", datasource = params$datasource, n = 5) +
+  ggplot2::geom_col(data = truth, fill = "#5CB8B2", alpha = 0.7, width = 0.9) +
+  theme( plot.title = element_text(size = 19),
+         plot.subtitle = element_text(size = 16, color = "#0033A0"),
+         plot.caption = element_text(size = 10)) -> mygg
+dml(ggobj = mygg, fonts = list(serif = 'Lato'))
+```
+
+---
+
+# Bias 3: Manifest Destiny
+
+Believing that certain characteristics, traits or condition are unchangeable and destined to remain the same over time.
+
+__Remember that change happens__: Avoid thinking in terms of "_manifest destiny_" by looking for signs of transformation in data over time. Cultures, countries, and people can and do change. 
+
+```{r ph=officer::ph_location(width = 10, height = 4, left = 1, top = 3)}
+
+## Correct answer
+x <- "C"
+p <- 0.12
+truth <- as.data.frame( cbind(x, p) )
+truth$p <- as.numeric(truth$p)
+
+plot_select_one(datalist, dico, "q3", datasource = "", n = 5) +
+  ggplot2::geom_col(data = truth, fill = "#5CB8B2", alpha = 0.7, width = 0.9) +
+  theme( plot.title = element_text(size = 19),
+         plot.subtitle = element_text(size = 16, color = "#0033A0"),
+         plot.caption = element_text(size = 10)) -> mygg
+dml(ggobj = mygg, fonts = list(serif = 'Lato'))
+```
+
+---
+
+# Bias 4: Single Perspective
+
+Being overly focused on one point of view can simplify complex decisions, but it can also lead to a narrow understanding of issues. 
+
+__Alternative Hypotheses__: Have we explored alternative hypotheses and explanations for our findings? Use multiple perspectives and with different viewpoints to avoid narrow thinking
+
+```{r ph=officer::ph_location(width = 10, height = 4, left = 1, top = 3)}
+
+## Correct answer
+x <- "C"
+p <- 0.48
+truth <- as.data.frame( cbind(x, p) )
+truth$p <- as.numeric(truth$p)
+
+plot_select_one(datalist, dico, "q4", datasource = params$datasource, n = 5) +
+  ggplot2::geom_col(data = truth, fill = "#5CB8B2", alpha = 0.7, width = 0.9) +
+  theme( plot.title = element_text(size = 19),
+         plot.subtitle = element_text(size = 16, color = "#0033A0"),
+         plot.caption = element_text(size = 10)) -> mygg
+dml(ggobj = mygg, fonts = list(serif = 'Lato'))
+```
+
+---
+
+# Bias 5: Fear Factor
+
+Focusing on things that seem dangerous skews our perception of what is risky. Constant exposure to frightening news stories heightens a sense of immediate threat.
+
+__Likelihood vs. Impact__: Are we balancing the likelihood of a risk with its potential impact to make sure we’re not overestimating its significance?
+
+```{r ph=officer::ph_location(width = 10, height = 4, left = 1, top = 3)}
+
+## Correct answer
+x <- "C"
+p <- 0.16
+truth <- as.data.frame( cbind(x, p) )
+truth$p <- as.numeric(truth$p)
+
+plot_select_one(datalist, dico, "q7", datasource = "", n = 5) +
+  ggplot2::geom_col(data = truth, fill = "#5CB8B2", alpha = 0.7, width = 0.9) +
+  theme( plot.title = element_text(size = 19),
+         plot.subtitle = element_text(size = 16, color = "#0033A0"),
+         plot.caption = element_text(size = 10)) -> mygg
+
+dml(ggobj = mygg, fonts = list(serif = 'Lato'))
+```
+
+---
+
+# Bias 6: Exaggeration
+
+Overestimating the importance of single, isolated, individual figures without putting them into context and pay attention to the size or scale of things.
+
+__Always get things in proportion__: Instead of looking at large figures in isolation, contextualize numbers to understand their true size and avoid overreaction to single, out-of-context statistics. 
+
+```{r ph=officer::ph_location(width = 10, height = 4, left = 1, top = 3)}
+
+## Correct answer
+x <- "C"
+p <- 0.27
+truth <- as.data.frame( cbind(x, p) )
+truth$p <- as.numeric(truth$p)
+
+plot_select_one(datalist, dico, "q9", datasource = params$datasource, n = 5) +
+  ggplot2::geom_col(data = truth, fill = "#5CB8B2", alpha = 0.7, width = 0.9) +
+  theme( plot.title = element_text(size = 19),
+         plot.subtitle = element_text(size = 16, color = "#0033A0"),
+         plot.caption = element_text(size = 10)) -> mygg
+
+dml(ggobj = mygg, fonts = list(serif = 'Lato'))
+```
+
+---
+
+# Bias 7: Dramatization
+
+We tend to neglect success and conform to "_white knight_" or "_missionary syndrom_" stereotype. In addition, when believing that humans have no chance of protecting themselves, we might step back from our responsibility to help.
+
+__Watch for your own personal and professional bias__: When working on a specific subject, we may tend to focus mostly on the bad side of things.
+
+```{r ph=officer::ph_location(width = 10, height = 4, left = 1, top = 3)}
+
+## Correct answer
+x <- "C"
+p <- 0.09
+truth <- as.data.frame( cbind(x, p) )
+truth$p <- as.numeric(truth$p)
+
+plot_select_one(datalist, dico, "q11", datasource = params$datasource, n = 5) +
+  ggplot2::geom_col(data = truth, fill = "#5CB8B2", alpha = 0.7, width = 0.9) +
+  theme( plot.title = element_text(size = 19),
+         plot.subtitle = element_text(size = 16, color = "#0033A0"),
+         plot.caption = element_text(size = 10)) -> mygg
+
+dml(ggobj = mygg, fonts = list(serif = 'Lato'))
+```
+
+---
+
+# Truth without Evidence: Quackery & the Pure Food and Drug Act of 1906
+
+![](charlatan.jpg)
+
+---
+
+# Take-away: Data Insights are to elevate our own perception
+
+After this session: 
+
+ 1. You understand the extent of human biases in decision making 
+
+ 2. You have seen examples of when they are likely to appear
+
+ 3. You have some rules of thumb and approaches to address them 
+
+ 4. You know that challenging an assumption with data can have a significant impact 
+
+ 5. You are aware that getting this right will impact IOM capacity to generate outcomes
